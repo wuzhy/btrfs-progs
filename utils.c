@@ -39,6 +39,7 @@
 #include <linux/loop.h>
 #include <linux/major.h>
 #include <linux/kdev_t.h>
+#include <blkid/blkid.h>
 #include <limits.h>
 #include "kerncompat.h"
 #include "radix-tree.h"
@@ -1713,4 +1714,52 @@ out:
 	fclose(f);
 
 	return ret;
+}
+
+int is_ssd(const char *file)
+{
+	char *devname;
+	blkid_probe probe;
+	char *dev;
+	char path[PATH_MAX];
+	dev_t disk;
+	int fd;
+	char rotational;
+
+	probe = blkid_new_probe_from_filename(file);
+	if (!probe)
+		return 0;
+
+	/*
+	 * We want to use blkid_devno_to_wholedisk() but it's broken for some
+	 * reason on F17 at least so we'll do this trickery
+	 */
+	disk = blkid_probe_get_wholedisk_devno(probe);
+	if (!disk)
+		return 0;
+
+	devname = blkid_devno_to_devname(disk);
+	if (!devname)
+		return 0;
+
+	dev = strrchr(devname, '/');
+	dev++;
+
+	snprintf(path, PATH_MAX, "/sys/block/%s/queue/rotational", dev);
+
+	free(devname);
+	blkid_free_probe(probe);
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+
+	if (read(fd, &rotational, sizeof(char)) < sizeof(char)) {
+		close(fd);
+		return 0;
+	}
+	close(fd);
+
+	return !atoi((const char *)&rotational);
 }
