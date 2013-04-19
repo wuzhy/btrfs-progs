@@ -508,6 +508,7 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	device->bytes_used = 0;
 	device->total_ios = 0;
 	device->dev_root = root->fs_info->dev_root;
+	device->name = path;
 
 	ret = btrfs_add_device(trans, root, device);
 	BUG_ON(ret);

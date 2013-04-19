@@ -127,6 +127,9 @@ static int cmd_df(int argc, char **argv)
 				snprintf(description, 5, "%s", "Data");
 				written += 4;
 			}
+		} else if (flags & BTRFS_BLOCK_GROUP_DATA_SSD) {
+			snprintf(description, 9, "%s", "Data_SSD");
+			written += 8;
 		} else if (flags & BTRFS_BLOCK_GROUP_SYSTEM) {
 			snprintf(description, 7, "%s", "System");
 			written += 6;

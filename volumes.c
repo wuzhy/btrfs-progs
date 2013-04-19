@@ -29,6 +29,7 @@
 #include "transaction.h"
 #include "print-tree.h"
 #include "volumes.h"
+#include "utils.h"
 
 struct stripe {
 	struct btrfs_device *dev;
@@ -655,7 +656,7 @@ static u32 find_raid56_stripe_len(u32 data_devices, u32 dev_stripe_target)
 
 int btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 		      struct btrfs_root *extent_root, u64 *start,
-		      u64 *num_bytes, u64 type)
+		      u64 *num_bytes, u64 type, int hot)
 {
 	u64 dev_offset;
 	struct btrfs_fs_info *info = extent_root->fs_info;
@@ -775,8 +776,19 @@ again:
 	/* build a private list of devices we will allocate from */
 	while(index < num_stripes) {
 		device = list_entry(cur, struct btrfs_device, dev_list);
-		avail = device->total_bytes - device->bytes_used;
 		cur = cur->next;
+		if (hot) {
+			int ret1 = type & (BTRFS_BLOCK_GROUP_DATA |
+				BTRFS_BLOCK_GROUP_METADATA |
+				BTRFS_BLOCK_GROUP_SYSTEM) &&
+				is_ssd(device->name);
+			int ret2 = type & BTRFS_BLOCK_GROUP_DATA_SSD &&
+				!is_ssd(device->name);
+			if (ret1 || ret2)
+				goto skip_dev;
+		}
+
+		avail = device->total_bytes - device->bytes_used;
 		if (avail >= min_free) {
 			list_move_tail(&device->dev_list, &private_devs);
 			index++;
@@ -784,6 +796,7 @@ again:
 				index++;
 		} else if (avail > max_avail)
 			max_avail = avail;
+skip_dev:
 		if (cur == dev_list)
 			break;
 	}

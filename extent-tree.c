@@ -1802,7 +1802,7 @@ static int do_chunk_alloc(struct btrfs_trans_handle *trans,
 		return 0;
 
 	ret = btrfs_alloc_chunk(trans, extent_root, &start, &num_bytes,
-	                        space_info->flags);
+	                        space_info->flags, 0);
 	if (ret == -ENOSPC) {
 		space_info->full = 1;
 		return 0;

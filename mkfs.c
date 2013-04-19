@@ -57,7 +57,34 @@ struct directory_name_entry {
 	struct list_head list;
 };
 
-static int make_root_dir(struct btrfs_root *root, int mixed)
+static int prealloc_ssd_bg(struct btrfs_root *root, int hot)
+{
+	struct btrfs_trans_handle *trans;
+	u64 chunk_start = 0;
+	u64 chunk_size = 0;
+	int ret = 0;
+
+	trans = btrfs_start_transaction(root, 1);
+
+	/*
+	 * If hot relocation is enabled, preallocate a SSD block group
+	 */
+	ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
+				&chunk_start, &chunk_size,
+				BTRFS_BLOCK_GROUP_DATA_SSD, hot);
+	BUG_ON(ret);
+	ret = btrfs_make_block_group(trans, root, 0,
+				BTRFS_BLOCK_GROUP_DATA_SSD,
+				BTRFS_FIRST_CHUNK_TREE_OBJECTID,
+				chunk_start, chunk_size);
+	BUG_ON(ret);
+
+	btrfs_commit_transaction(trans, root);
+	
+	return ret;
+}
+
+static int make_root_dir(struct btrfs_root *root, int mixed, int hot)
 {
 	struct btrfs_trans_handle *trans;
 	struct btrfs_key location;
@@ -80,7 +107,7 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
 					&chunk_start, &chunk_size,
 					BTRFS_BLOCK_GROUP_METADATA |
-					BTRFS_BLOCK_GROUP_DATA);
+					BTRFS_BLOCK_GROUP_DATA, hot);
 		BUG_ON(ret);
 		ret = btrfs_make_block_group(trans, root, 0,
 					     BTRFS_BLOCK_GROUP_METADATA |
@@ -92,7 +119,7 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 	} else {
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
 					&chunk_start, &chunk_size,
-					BTRFS_BLOCK_GROUP_METADATA);
+					BTRFS_BLOCK_GROUP_METADATA, hot);
 		BUG_ON(ret);
 		ret = btrfs_make_block_group(trans, root, 0,
 					     BTRFS_BLOCK_GROUP_METADATA,
@@ -109,7 +136,7 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 	if (!mixed) {
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
 					&chunk_start, &chunk_size,
-					BTRFS_BLOCK_GROUP_DATA);
+					BTRFS_BLOCK_GROUP_DATA, hot);
 		BUG_ON(ret);
 		ret = btrfs_make_block_group(trans, root, 0,
 					     BTRFS_BLOCK_GROUP_DATA,
@@ -187,14 +214,14 @@ static int recow_roots(struct btrfs_trans_handle *trans,
 }
 
 static int create_one_raid_group(struct btrfs_trans_handle *trans,
-			      struct btrfs_root *root, u64 type)
+			      struct btrfs_root *root, u64 type, int hot)
 {
 	u64 chunk_start;
 	u64 chunk_size;
 	int ret;
 
 	ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
-				&chunk_start, &chunk_size, type);
+				&chunk_start, &chunk_size, type, hot);
 	BUG_ON(ret);
 	ret = btrfs_make_block_group(trans, root->fs_info->extent_root, 0,
 				     type, BTRFS_FIRST_CHUNK_TREE_OBJECTID,
@@ -206,24 +233,30 @@ static int create_one_raid_group(struct btrfs_trans_handle *trans,
 static int create_raid_groups(struct btrfs_trans_handle *trans,
 			      struct btrfs_root *root, u64 data_profile,
 			      int data_profile_opt, u64 metadata_profile,
-			      int metadata_profile_opt, int mixed, int ssd)
+			      int metadata_profile_opt, int mixed, int ssd,
+			      int hot)
 {
 	u64 num_devices = btrfs_super_num_devices(root->fs_info->super_copy);
 	u64 allowed = 0;
-	u64 devices_for_raid = num_devices;
+	u64 devices_for_raid;
 	int ret;
+
+	if (hot)
+		num_devices -= ssd;
+
+	devices_for_raid = num_devices;
 
 	/*
 	 * Set default profiles according to number of added devices.
 	 * For mixed groups defaults are single/single.
 	 */
 	if (!metadata_profile_opt && !mixed) {
-		if (num_devices == 1 && ssd)
+		if (num_devices == 1 && ssd && !hot)
 			printf("Detected a SSD, turning off metadata "
 			       "duplication.  Mkfs with -m dup if you want to "
 			       "force metadata duplication.\n");
 		metadata_profile = (num_devices > 1) ?
-			BTRFS_BLOCK_GROUP_RAID1 : (ssd) ? 0: BTRFS_BLOCK_GROUP_DUP;
+			BTRFS_BLOCK_GROUP_RAID1 : (ssd && !hot) ? 0: BTRFS_BLOCK_GROUP_DUP;
 	}
 	if (!data_profile_opt && !mixed) {
 		data_profile = (num_devices > 1) ?
@@ -271,14 +304,14 @@ static int create_raid_groups(struct btrfs_trans_handle *trans,
 
 		ret = create_one_raid_group(trans, root,
 					    BTRFS_BLOCK_GROUP_SYSTEM |
-					    (allowed & metadata_profile));
+					    (allowed & metadata_profile), hot);
 		BUG_ON(ret);
 
 		if (mixed)
 			meta_flags |= BTRFS_BLOCK_GROUP_DATA;
 
 		ret = create_one_raid_group(trans, root, meta_flags |
-					    (allowed & metadata_profile));
+					    (allowed & metadata_profile), hot);
 		BUG_ON(ret);
 
 		ret = recow_roots(trans, root);
@@ -287,7 +320,7 @@ static int create_raid_groups(struct btrfs_trans_handle *trans,
 	if (!mixed && num_devices > 1 && (allowed & data_profile)) {
 		ret = create_one_raid_group(trans, root,
 					    BTRFS_BLOCK_GROUP_DATA |
-					    (allowed & data_profile));
+					    (allowed & data_profile), hot);
 		BUG_ON(ret);
 	}
 	return 0;
@@ -328,6 +361,7 @@ static void print_usage(void)
 	fprintf(stderr, "\t -b --byte-count total number of bytes in the FS\n");
 	fprintf(stderr, "\t -d --data data profile, raid0, raid1, raid5, raid6, raid10, dup or single\n");
 	fprintf(stderr, "\t -f --force force overwrite of existing filesystem\n");
+	fprintf(stderr, "\t -h --hot allocate hot block groups to SSD\n");
 	fprintf(stderr, "\t -l --leafsize size of btree leaves\n");
 	fprintf(stderr, "\t -L --label set a label\n");
 	fprintf(stderr, "\t -m --metadata metadata profile, values like data profile\n");
@@ -386,6 +420,7 @@ static char *parse_label(char *input)
 static struct option long_options[] = {
 	{ "alloc-start", 1, NULL, 'A'},
 	{ "byte-count", 1, NULL, 'b' },
+	{ "hot-relocation", 0, NULL, 'h' },
 	{ "force", 0, NULL, 'f' },
 	{ "leafsize", 1, NULL, 'l' },
 	{ "label", 1, NULL, 'L'},
@@ -1058,7 +1093,7 @@ static int create_chunks(struct btrfs_trans_handle *trans,
 
 	for (i = 0; i < num_of_meta_chunks; i++) {
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
-					&chunk_start, &chunk_size, meta_type);
+					&chunk_start, &chunk_size, meta_type, 0);
 		BUG_ON(ret);
 		ret = btrfs_make_block_group(trans, root->fs_info->extent_root, 0,
 					     meta_type, BTRFS_FIRST_CHUNK_TREE_OBJECTID,
@@ -1320,6 +1355,7 @@ int main(int ac, char **av)
 	int metadata_profile_opt = 0;
 	int nodiscard = 0;
 	int ssd = 0;
+	int hdd = 0;
 	int force_overwrite = 0;
 
 	char *source_dir = NULL;
@@ -1330,10 +1366,11 @@ int main(int ac, char **av)
 	char *pretty_buf;
 	struct btrfs_super_block *super;
 	u64 flags;
+	int hot = 0;
 
 	while(1) {
 		int c;
-		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:r:VMK", long_options,
+		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:r:hVMK", long_options,
 				&option_index);
 		if (c < 0)
 			break;
@@ -1374,6 +1411,9 @@ int main(int ac, char **av)
 					mixed = 1;
 				}
 				zero_end = 0;
+				break;
+			case 'h':
+				hot = 1;
 				break;
 			case 'V':
 				print_version();
@@ -1480,6 +1520,22 @@ int main(int ac, char **av)
 
 	ssd = is_ssd(file);
 
+	if (hot) {
+		if (mixed) {
+			fprintf(stderr, "unable to enable hot relocation mode "
+				"and mixed mode together\n");
+			exit(1);
+		}
+
+		if (ssd) {
+			fprintf(stderr, "Hot relocation mode need "
+				"the first device %s to be NOT a SSD drive\n",
+				file);
+			exit(1);
+		} else
+			hdd++;
+	}
+
 	if (mixed) {
 		if (metadata_profile != data_profile) {
 			fprintf(stderr, "With mixed block groups data and metadata "
@@ -1510,7 +1566,7 @@ int main(int ac, char **av)
 	}
 	root->fs_info->alloc_start = alloc_start;
 
-	ret = make_root_dir(root, mixed);
+	ret = make_root_dir(root, mixed, hot);
 	if (ret) {
 		fprintf(stderr, "failed to setup the root directory\n");
 		exit(1);
@@ -1591,13 +1647,37 @@ int main(int ac, char **av)
 					sectorsize, sectorsize, sectorsize);
 		BUG_ON(ret);
 		btrfs_register_one_device(file);
+
+		/* Count the number of the SSD drives */
+		if (is_ssd(file))
+			ssd++;
+		else
+			hdd++;
 	}
 
 raid_groups:
+	btrfs_commit_transaction(trans, root);
+
+	if (hot) {
+		if (ssd < 1 || hdd < 1) {
+			fprintf(stderr, "failed to specify at least one HDD "
+				"and at least one SSD\n");
+			exit(1);
+		}
+
+		ret = prealloc_ssd_bg(root, hot);
+		if (ret) {
+			fprintf(stderr, "failed to preallocate block group for SSD\n");
+			exit(1);
+		}
+	}
+
+	trans = btrfs_start_transaction(root, 1);
+
 	if (!source_dir_set) {
 		ret = create_raid_groups(trans, root, data_profile,
 				 data_profile_opt, metadata_profile,
-				 metadata_profile_opt, mixed, ssd);
+				 metadata_profile_opt, mixed, ssd, hot);
 		BUG_ON(ret);
 	}
 
